@@ -1,0 +1,1224 @@
+
+//==============================================================================
+/*
+    Software License Agreement (BSD License)
+    Copyright (c) 2003-2024, CHAI3D
+    (www.chai3d.org)
+
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+
+    * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+
+    * Redistributions in binary form must reproduce the above
+    copyright notice, this list of conditions and the following
+    disclaimer in the documentation and/or other materials provided
+    with the distribution.
+
+    * Neither the name of CHAI3D nor the names of its contributors may
+    be used to endorse or promote products derived from this software
+    without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+    FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+    COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+    INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+    BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+    LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+    LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+    ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
+
+    \author    <http://www.chai3d.org>
+    \author    Francois Conti
+    \version   3.3.0
+*/
+//==============================================================================
+
+//------------------------------------------------------------------------------
+#include "chai3d.h"
+//------------------------------------------------------------------------------
+#include <GLFW/glfw3.h>
+#include <fstream>
+#include <string>
+#include <iostream>
+#include <vector>
+#include <cstdlib>
+//------------------------------------------------------------------------------
+
+// Read atomic records from a PDB file
+struct DNAAtom
+{
+    std::string element;
+    std::string atomName;
+    std::string residueName;
+    char chainID;
+    double x;
+    double y;
+    double z;
+};
+int countPDBAtoms(const std::string& filename)
+{
+    std::ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        std::cout << "ERROR: Cannot open PDB file: "
+            << filename << std::endl;
+        return -1;
+    }
+
+    std::string line;
+    int atomCount = 0;
+
+    while (std::getline(file, line))
+    {
+        if (line.compare(0, 6, "ATOM  ") == 0)
+        {
+            atomCount++;
+        }
+    }
+
+    return atomCount;
+}
+std::vector<DNAAtom> loadPDBAtoms(const std::string& filename)
+{
+    std::vector<DNAAtom> atoms;
+    std::ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        std::cout << "ERROR: Cannot open PDB file." << std::endl;
+        return atoms;
+    }
+
+    std::string line;
+
+    while (std::getline(file, line))
+    {
+        if (line.compare(0, 6, "ATOM  ") != 0 || line.size() < 78)
+        {
+            continue;
+        }
+
+        DNAAtom atom;
+
+        atom.atomName = line.substr(12, 4);
+        atom.residueName = line.substr(17, 3);
+        atom.chainID = line[21];
+
+        atom.x = std::stod(line.substr(30, 8));
+        atom.y = std::stod(line.substr(38, 8));
+        atom.z = std::stod(line.substr(46, 8));
+
+        atom.element = line.substr(76, 2);
+
+        atoms.push_back(atom);
+    }
+
+    return atoms;
+}
+using namespace chai3d;
+using namespace std;
+//------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+// GENERAL SETTINGS
+//------------------------------------------------------------------------------
+
+// stereo Mode
+/*
+    C_STEREO_DISABLED:            Stereo is disabled
+    C_STEREO_ACTIVE:              Active stereo for OpenGL NVDIA QUADRO cards
+    C_STEREO_PASSIVE_LEFT_RIGHT:  Passive stereo where L/R images are rendered next to each other
+    C_STEREO_PASSIVE_TOP_BOTTOM:  Passive stereo where L/R images are rendered above each other
+*/
+cStereoMode stereoMode = C_STEREO_DISABLED;
+
+// fullscreen mode
+bool fullscreen = false;
+
+// mirrored display
+bool mirroredDisplay = false;
+
+
+//------------------------------------------------------------------------------
+// STATES
+//------------------------------------------------------------------------------
+enum MouseState
+{
+    MOUSE_IDLE,
+    MOUSE_SELECTION
+};
+
+
+//------------------------------------------------------------------------------
+// DECLARED VARIABLES
+//------------------------------------------------------------------------------
+
+// a world that contains all objects of the virtual environment
+cWorld* world;
+
+// a camera to render the world in the window display
+cCamera* camera;
+
+// a viewport to display the scene viewed by the camera
+cViewport* viewport = nullptr;
+
+// a light source to illuminate the objects in the world
+cDirectionalLight* light;
+
+// a haptic device handler
+cHapticDeviceHandler* handler;
+
+// a pointer to the current haptic device
+cGenericHapticDevicePtr hapticDevice;
+
+// a virtual tool representing the haptic device in the scene
+cToolCursor* tool;
+
+// some objects
+cMesh* mesh;
+cShapeSphere* sphere;
+cShapeBox* box;
+cShapeCylinder* cylinder;
+cShapeTorus* torus;
+cShapeLine* line1;
+cShapeLine* line2;
+
+// a small sphere which displays the position of a click hit in the world
+cShapeSphere* sphereSelect;
+
+// a small line to display the surface normal at the selection point
+cShapeLine* normalSelect;
+
+// a pointer to the selected object
+cGenericObject* selectedObject;
+
+// offset between the position of the mmouse click on the object and the object reference frame location.
+cVector3d selectedObjectOffset;
+
+// position of mouse click.
+cVector3d selectedPoint;
+
+// a colored background
+cBackground* background;
+
+// a font for rendering text
+cFontPtr font;
+
+// a label to display the rate [Hz] at which the simulation is running
+cLabel* labelRates;
+
+// a label to explain what is happening
+cLabel* labelMessage;
+
+// a widget panel
+cPanel* panel;
+
+// some labels
+cLabel* labelRed;
+cLabel* labelGreen;
+cLabel* labelBlue;
+cLabel* labelOrange;
+cLabel* labelGray;
+
+// a flag to indicate if the haptic simulation currently running
+bool simulationRunning = false;
+
+// a flag to indicate if the haptic simulation has terminated
+bool simulationFinished = true;
+
+// mouse position
+double mouseX, mouseY;
+
+// DNA rotation controls
+bool rotatingDNA = false;
+bool rotationStarted = false;
+double previousMouseX = 0.0;
+double previousMouseY = 0.0;
+
+// Reference to the real DNA structure
+cMultiMesh* pdbDNAMolecule = nullptr;
+
+// mouse state
+MouseState mouseState = MOUSE_IDLE;
+
+// a frequency counter to measure the simulation graphic rate
+cFrequencyCounter freqCounterGraphics;
+
+// a frequency counter to measure the simulation haptic rate
+cFrequencyCounter freqCounterHaptics;
+
+// haptic thread
+cThread* hapticsThread;
+
+// a handle to window display context
+GLFWwindow* window = nullptr;
+
+// current size of GLFW window
+int windowW = 0;
+int windowH = 0;
+
+// current size of GLFW framebuffer
+int framebufferW = 0;
+int framebufferH = 0;
+
+// swap interval for the display context (vertical synchronization)
+int swapInterval = 1;
+
+
+//------------------------------------------------------------------------------
+// DECLARED FUNCTIONS
+//------------------------------------------------------------------------------
+
+// callback when the window is resized
+void onWindowSizeCallback(GLFWwindow* a_window, int a_width, int a_height);
+
+// callback when the window framebuffer is resized
+void onFrameBufferSizeCallback(GLFWwindow* a_window, int a_width, int a_height);
+
+// callback when an error GLFW occurs
+void onErrorCallback(int a_error, const char* a_description);
+
+// callback when a key is pressed
+void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, int a_mods);
+
+// callback when window content scaling is modified
+void onWindowContentScaleCallback(GLFWwindow* a_window, float a_xscale, float a_yscale);
+
+// callback to handle mouse click
+void onMouseButtonCallback(GLFWwindow* a_window, int a_button, int a_action, int a_mods);
+
+// callback to handle mouse motion
+void onMouseMotionCallback(GLFWwindow* a_window, double a_posX, double a_posY);
+
+// Callback for mouse-wheel zoom
+void onScrollCallback(GLFWwindow* a_window, double xoffset, double yoffset);
+// this function renders the scene
+void renderGraphics(void);
+
+// this function contains the main haptics simulation loop
+void renderHaptics(void);
+
+// this function closes the application
+void close(void);
+
+
+//==============================================================================
+/*
+    DEMO:   07-mouse-select.cpp
+
+    This application illustrates how the computer mouse can be used to select
+    widgets and objects in the virtual world.
+*/
+//==============================================================================
+
+int main(int argc, char* argv[])
+{
+
+    // Test loading real DNA structure data
+    int pdbAtomCount = countPDBAtoms(
+        "C:/Projects/chai3d-3.3.0/examples/GLFW/34-dna-double-helix/1BNA.pdb"
+    );
+
+    std::cout << "PDB atom count: "
+        << pdbAtomCount << std::endl;
+    std::vector<DNAAtom> dnaAtoms = loadPDBAtoms(
+        "C:/Projects/chai3d-3.3.0/examples/GLFW/34-dna-double-helix/1BNA.pdb"
+    );
+
+    std::cout << "Loaded DNA atoms: "
+        << dnaAtoms.size() << std::endl;
+
+    if (!dnaAtoms.empty())
+    {
+        const DNAAtom& first = dnaAtoms[0];
+
+        std::cout << "First atom: " << first.atomName
+            << " | Chain: " << first.chainID
+            << " | X: " << first.x
+            << " Y: " << first.y
+            << " Z: " << first.z << std::endl;
+    }
+
+
+    //--------------------------------------------------------------------------
+    // INITIALIZATION
+    //--------------------------------------------------------------------------
+
+    cout << endl;
+    cout << "-----------------------------------" << endl;
+    cout << "CHAI3D" << endl;
+    cout << "DNA DOUBLE HELIX - PDB TEST VERSION" << endl;
+    cout << "Copyright 2003-2024" << endl;
+    cout << "-----------------------------------" << endl << endl << endl;
+    cout << "Keyboard Options:" << endl << endl;
+    cout << "[f] - Enable/Disable full screen mode" << endl;
+    cout << "[m] - Enable/Disable vertical mirroring" << endl;
+    cout << "[q] - Exit application" << endl;
+    cout << endl << endl;
+
+
+    //--------------------------------------------------------------------------
+    // OPEN GL - WINDOW DISPLAY
+    //--------------------------------------------------------------------------
+
+    // initialize GLFW library
+    if (!glfwInit())
+    {
+        cout << "failed initialization" << endl;
+        cSleepMs(1000);
+        return 1;
+    }
+
+    // set GLFW error callback
+    glfwSetErrorCallback(onErrorCallback);
+
+    // compute desired size of window
+    const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+    windowW = 0.8 * mode->height;
+    windowH = 0.5 * mode->height;
+    int x = 0.5 * (mode->width - windowW);
+    int y = 0.5 * (mode->height - windowH);
+
+    // set OpenGL version
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+
+    // enable double buffering
+    glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+
+    // set the desired number of samples to use for multisampling
+    glfwWindowHint(GLFW_SAMPLES, 4);
+
+    // specify that window should be resized based on monitor content scale
+    glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
+
+    // set active stereo mode
+    if (stereoMode == C_STEREO_ACTIVE)
+    {
+        glfwWindowHint(GLFW_STEREO, GL_TRUE);
+    }
+    else
+    {
+        glfwWindowHint(GLFW_STEREO, GL_FALSE);
+    }
+
+    // create display context
+    window = glfwCreateWindow(windowW, windowH, "DNA Double Helix", NULL, NULL);
+    if (!window)
+    {
+        cout << "failed to create window" << endl;
+        cSleepMs(1000);
+        glfwTerminate();
+        return 1;
+    }
+
+    // set GLFW key callback
+    glfwSetKeyCallback(window, onKeyCallback);
+
+    // set GLFW window size callback
+    glfwSetWindowSizeCallback(window, onWindowSizeCallback);
+
+    // set GLFW framebuffer size callback
+    glfwSetFramebufferSizeCallback(window, onFrameBufferSizeCallback);
+
+    // set GLFW window content scaling callback
+    glfwSetWindowContentScaleCallback(window, onWindowContentScaleCallback);
+
+    // set GLFW mouse position callback
+    glfwSetCursorPosCallback(window, onMouseMotionCallback);
+
+    // set GLFW mouse button callback
+    glfwSetMouseButtonCallback(window, onMouseButtonCallback);
+
+    // Enable mouse-wheel zoom
+    glfwSetScrollCallback(window, onScrollCallback);
+
+    // get width and height of window
+    glfwGetFramebufferSize(window, &framebufferW, &framebufferH);
+
+    // set position of window
+    glfwSetWindowPos(window, x, y);
+
+    // set window size
+    glfwSetWindowSize(window, windowW, windowH);
+
+    // set GLFW current display context
+    glfwMakeContextCurrent(window);
+
+    // set GLFW swap interval for the current display context
+    glfwSwapInterval(swapInterval);
+
+
+#ifdef GLEW_VERSION
+    // initialize GLEW library
+    if (glewInit() != GLEW_OK)
+    {
+        cout << "failed to initialize GLEW library" << endl;
+        glfwTerminate();
+        return 1;
+    }
+#endif
+
+
+    //--------------------------------------------------------------------------
+    // WORLD - CAMERA - LIGHTING
+    //--------------------------------------------------------------------------
+
+    // create a new world.
+    world = new cWorld();
+
+    // set the background color of the environment
+    world->m_backgroundColor.setWhite();
+
+    // create a camera and insert it into the virtual world
+    camera = new cCamera(world);
+    world->addChild(camera);
+
+    // position and orient the camera
+    camera->set(cVector3d(0.8, 0.8, 0.6),    // camera position (eye)
+        cVector3d(0.0, 0.0, 0.0),    // lookat position (target)
+        cVector3d(0.0, 0.0, 1.0));   // direction of the (up) vector
+
+    // set the near and far clipping planes of the camera
+    // anything in front or behind these clipping planes will not be rendered
+    camera->setClippingPlanes(0.01, 10.0);
+
+    // set stereo mode
+    camera->setStereoMode(stereoMode);
+
+    // set stereo eye separation and focal length (applies only if stereo is enabled)
+    camera->setStereoEyeSeparation(0.03);
+    camera->setStereoFocalLength(1.8);
+
+    // set vertical mirrored display mode
+    camera->setMirrorVertical(mirroredDisplay);
+
+    // create a light source
+    light = new cDirectionalLight(world);
+
+    // attach light to camera
+    camera->addChild(light);
+
+    // enable light source
+    light->setEnabled(true);
+
+    // position the light source
+    light->setLocalPos(0.0, 0.5, 0.0);
+
+    // define the direction of the light beam
+    light->setDir(-2.5, -0.8, 0.0);
+
+
+    //--------------------------------------------------------------------------
+    // HAPTIC DEVICES / TOOLS
+    //--------------------------------------------------------------------------
+
+    // create a haptic device handler
+    handler = new cHapticDeviceHandler();
+
+    // get access to the first available haptic device
+    handler->getDevice(hapticDevice, 0);
+
+    // retrieve information about the current haptic device
+    cHapticDeviceInfo hapticDeviceInfo = hapticDevice->getSpecifications();
+
+    // if the haptic devices carries a gripper, enable it to behave like a user switch
+    hapticDevice->setEnableGripperUserSwitch(true);
+
+    // create a tool (cursor) and insert into the world
+    tool = new cToolCursor(world);
+    world->addChild(tool);
+
+    // connect the haptic device to the tool
+    tool->setHapticDevice(hapticDevice);
+
+    // map the physical workspace of the haptic device to a larger virtual workspace.
+    tool->setWorkspaceRadius(0.9);
+
+    // define the radius of the tool (sphere)
+    double toolRadius = 0.01;
+
+    // define a radius for the tool
+    tool->setRadius(toolRadius);
+
+    // hide the device sphere. only show proxy.
+    tool->setShowContactPoints(true, false);
+
+    // enable if objects in the scene are going to rotate of translate
+    // or possibly collide against the tool. If the environment
+    // is entirely static, you can set this parameter to "false"
+    tool->enableDynamicObjects(true);
+
+    // start the haptic tool
+    tool->start();
+
+
+    //--------------------------------------------------------------------------
+    // CREATE OBJECTS
+    //--------------------------------------------------------------------------
+
+    // read the scale factor between the physical workspace of the haptic
+    // device and the virtual workspace defined for the tool
+    double workspaceScaleFactor = tool->getWorkspaceScaleFactor();
+
+    // stiffness properties
+    double maxStiffness = hapticDeviceInfo.m_maxLinearStiffness / workspaceScaleFactor;
+
+    // --------------------------------------------------
+// REAL DNA DOUBLE HELIX - Loaded from PDB
+// --------------------------------------------------
+
+// Create a container for all PDB atoms
+    cMultiMesh* pdbDNA = new cMultiMesh();
+    world->addChild(pdbDNA);
+    pdbDNAMolecule = pdbDNA;
+
+    // Create separate meshes for each chemical element
+    cMesh* pdbCarbon = pdbDNA->newMesh();
+    pdbCarbon->m_material->setRedFireBrick();
+
+    cMesh* pdbNitrogen = pdbDNA->newMesh();
+    pdbNitrogen->m_material->setGreen();
+
+    cMesh* pdbOxygen = pdbDNA->newMesh();
+    pdbOxygen->m_material->setGrayGainsboro();
+
+    cMesh* pdbPhosphorus = pdbDNA->newMesh();
+    pdbPhosphorus->m_material->setOrange();
+
+    cMesh* pdbOther = pdbDNA->newMesh();
+    pdbOther->m_material->setBlue();
+
+    // Convert PDB atomic coordinates into CHAI3D spheres
+    
+    // Calculate the geometric center of the DNA atoms
+    cVector3d dnaCenter(0.0, 0.0, 0.0);
+
+    if (!dnaAtoms.empty())
+    {
+        for (const DNAAtom& atom : dnaAtoms)
+        {
+            dnaCenter.add(atom.x, atom.y, atom.z);
+        }
+
+        dnaCenter.div((double)dnaAtoms.size());
+    }
+
+    std::cout << "DNA center: "
+        << dnaCenter.x() << ", "
+        << dnaCenter.y() << ", "
+        << dnaCenter.z() << std::endl;
+
+    for (const DNAAtom& atom : dnaAtoms)
+    {
+        cMesh* targetMesh = pdbOther;
+
+        if (atom.element.find("C") != std::string::npos)
+            targetMesh = pdbCarbon;
+        else if (atom.element.find("N") != std::string::npos)
+            targetMesh = pdbNitrogen;
+        else if (atom.element.find("O") != std::string::npos)
+            targetMesh = pdbOxygen;
+        else if (atom.element.find("P") != std::string::npos)
+            targetMesh = pdbPhosphorus;
+
+        cCreateSphere(
+            targetMesh,
+            0.7,
+            12,
+            12,
+            cVector3d(
+                atom.x - dnaCenter.x(),
+                atom.y - dnaCenter.y(),
+                atom.z - dnaCenter.z()
+            )
+        );
+    }
+
+    // Scale the experimental coordinates to fit our scene
+    pdbDNA->scale(0.015);
+
+    // Enable selection of the DNA structure
+    pdbDNA->createAABBCollisionDetector(0.01);
+
+    std::cout << "Created 3D DNA structure from "
+        << dnaAtoms.size() << " atoms." << std::endl;
+    // create a small sphere to display a selection hit with the mouse
+    sphereSelect = new cShapeSphere(0.02);
+    world->addChild(sphereSelect);
+    sphereSelect->m_material->setRedCrimson();
+    sphereSelect->setShowEnabled(false);
+    sphereSelect->setGhostEnabled(true);
+
+    normalSelect = new cShapeLine();
+    sphereSelect->addChild(normalSelect);
+    normalSelect->m_colorPointA.setRedCrimson();
+    normalSelect->m_colorPointB.setRedCrimson();
+    normalSelect->setShowEnabled(false);
+    normalSelect->setGhostEnabled(true);
+
+
+    // set default selected object
+    // No object is selected when the application starts
+    selectedObject = nullptr;
+
+
+    //--------------------------------------------------------------------------
+    // WIDGETS
+    //--------------------------------------------------------------------------
+
+    // create a font
+    font = NEW_CFONT_CALIBRI_20();
+
+    // create a label to display the haptic and graphic rate of the simulation
+    labelRates = new cLabel(font);
+    camera->m_frontLayer->addChild(labelRates);
+
+    // set font color
+    labelRates->m_fontColor.setBlack();
+
+    // create a background
+    background = new cBackground();
+    camera->m_backLayer->addChild(background);
+
+    // set background properties
+    background->setCornerColors(cColorf(1.0, 1.0, 1.0),
+        cColorf(1.0, 1.0, 1.0),
+        cColorf(0.8, 0.8, 0.8),
+        cColorf(0.8, 0.8, 0.8));
+
+    // a widget panel
+    panel = new cPanel();
+    camera->m_frontLayer->addChild(panel);
+    panel->setSize(100, 115);
+    panel->m_material->setGrayDim();
+    panel->setTransparencyLevel(0.8);
+    // Hide the original CHAI3D color-selection panel
+    panel->setShowEnabled(false);
+
+    // Atom colour legend
+
+    labelRed = new cLabel(font);
+    panel->addChild(labelRed);
+    labelRed->setText("Carbon (C) - Red");
+    labelRed->m_fontColor.setBlack();
+
+    labelGreen = new cLabel(font);
+    panel->addChild(labelGreen);
+    labelGreen->setText("Nitrogen (N) - Green");
+    labelGreen->m_fontColor.setBlack();
+
+    labelBlue = new cLabel(font);
+    panel->addChild(labelBlue);
+    labelBlue->setText("Other / Unknown - Blue");
+    labelBlue->m_fontColor.setBlack();
+
+    labelOrange = new cLabel(font);
+    panel->addChild(labelOrange);
+    labelOrange->setText("Phosphorus (P) - Orange");
+    labelOrange->m_fontColor.setBlack();
+
+    labelGray = new cLabel(font);
+    panel->addChild(labelGray);
+    labelGray->setText("Oxygen (O) - Gray");
+    labelGray->m_fontColor.setBlack();
+
+    // create a label with a small message
+    labelMessage = new cLabel(font);
+    camera->m_frontLayer->addChild(labelMessage);
+
+    // set font color
+    labelMessage->m_fontColor.setBlack();
+
+    // set text message
+    labelMessage->setText("DNA Double Helix | Experimental Structure: PDB 1BNA");
+
+    // Move the atom legend labels into the camera front layer
+    panel->removeChild(labelRed);
+    panel->removeChild(labelGreen);
+    panel->removeChild(labelBlue);
+    panel->removeChild(labelOrange);
+    panel->removeChild(labelGray);
+
+    camera->m_frontLayer->addChild(labelRed);
+    camera->m_frontLayer->addChild(labelGreen);
+    camera->m_frontLayer->addChild(labelBlue);
+    camera->m_frontLayer->addChild(labelOrange);
+    camera->m_frontLayer->addChild(labelGray);
+
+    // Position the legend at the lower-left of the window
+    labelRed->setLocalPos(20, 150, 0.1);
+    labelGreen->setLocalPos(20, 125, 0.1);
+    labelBlue->setLocalPos(20, 100, 0.1);
+    labelOrange->setLocalPos(20, 75, 0.1);
+    labelGray->setLocalPos(20, 50, 0.1);
+    //--------------------------------------------------------------------------
+    // VIEWPORT DISPLAY
+    //--------------------------------------------------------------------------
+
+    // get content scale factor
+    float contentScaleW, contentScaleH;
+    glfwGetWindowContentScale(window, &contentScaleW, &contentScaleH);
+
+    // create a viewport to display the scene.
+    viewport = new cViewport(camera, contentScaleW, contentScaleH);
+
+
+    //--------------------------------------------------------------------------
+    // START HAPTIC SIMULATION THREAD
+    //--------------------------------------------------------------------------
+
+    // create a thread which starts the main haptics rendering loop
+    hapticsThread = new cThread();
+    hapticsThread->start(renderHaptics, CTHREAD_PRIORITY_HAPTICS);
+
+    // setup callback when application exits
+    atexit(close);
+
+
+    //--------------------------------------------------------------------------
+    // MAIN GRAPHIC LOOP
+    //--------------------------------------------------------------------------
+
+    // main graphic loop
+    while (!glfwWindowShouldClose(window))
+    {
+        // render graphics
+        renderGraphics();
+
+        // process events
+        glfwPollEvents();
+    }
+
+    // close window
+    glfwDestroyWindow(window);
+
+    // terminate GLFW library
+    glfwTerminate();
+
+    // exit
+    return 0;
+}
+
+//------------------------------------------------------------------------------
+
+void onWindowSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
+{
+    // update window size
+    windowW = a_width;
+    windowH = a_height;
+
+    // render scene
+    renderGraphics();
+}
+
+//------------------------------------------------------------------------------
+
+void onFrameBufferSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
+{
+    // update frame buffer size
+    framebufferW = a_width;
+    framebufferH = a_height;
+}
+
+//------------------------------------------------------------------------------
+
+void onWindowContentScaleCallback(GLFWwindow* a_window, float a_xscale, float a_yscale)
+{
+    // update window content scale factor
+    viewport->setContentScale(a_xscale, a_yscale);
+}
+
+//------------------------------------------------------------------------------
+
+void onErrorCallback(int a_error, const char* a_description)
+{
+    cout << "Error: " << a_description << endl;
+}
+
+//------------------------------------------------------------------------------
+
+void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, int a_mods)
+{
+    // filter calls that only include a key press
+    if ((a_action != GLFW_PRESS) && (a_action != GLFW_REPEAT))
+    {
+        return;
+    }
+
+    // option - exit
+    else if ((a_key == GLFW_KEY_ESCAPE) || (a_key == GLFW_KEY_Q))
+    {
+        glfwSetWindowShouldClose(a_window, GLFW_TRUE);
+    }
+
+    // option - toggle fullscreen
+    else if (a_key == GLFW_KEY_F)
+    {
+        // toggle state variable
+        fullscreen = !fullscreen;
+
+        // get handle to monitor
+        GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+
+        // get information about monitor
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+
+        // set fullscreen or window mode
+        if (fullscreen)
+        {
+            glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+        }
+        else
+        {
+            int w = 0.8 * mode->height;
+            int h = 0.5 * mode->height;
+            int x = 0.5 * (mode->width - w);
+            int y = 0.5 * (mode->height - h);
+            glfwSetWindowMonitor(window, NULL, x, y, w, h, mode->refreshRate);
+        }
+
+        // set the desired swap interval and number of samples to use for multisampling
+        glfwSwapInterval(swapInterval);
+        glfwWindowHint(GLFW_SAMPLES, 4);
+    }
+
+    // option - toggle vertical mirroring
+    else if (a_key == GLFW_KEY_M)
+    {
+        mirroredDisplay = !mirroredDisplay;
+        camera->setMirrorVertical(mirroredDisplay);
+    }
+}
+
+//------------------------------------------------------------------------------
+
+void onMouseButtonCallback(GLFWwindow* a_window, int a_button, int a_action, int a_mods)
+{
+    // Start or stop DNA rotation using the right mouse button
+    if (a_button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
+        if (a_action == GLFW_PRESS)
+        {
+            rotatingDNA = true;
+            glfwGetCursorPos(a_window, &previousMouseX, &previousMouseY);
+        }
+        else if (a_action == GLFW_RELEASE)
+        {
+            rotatingDNA = false;
+        }
+
+        return;
+    }
+    if (a_button == GLFW_MOUSE_BUTTON_LEFT && a_action == GLFW_PRESS)
+    {
+        // store mouse position
+        glfwGetCursorPos(window, &mouseX, &mouseY);
+
+        // variable for storing collision information
+        cCollisionRecorder recorder;
+        cCollisionSettings settings;
+
+        // detect for any collision between mouse and front layer widgets
+        bool hit = viewport->selectFrontLayer(mouseX, (windowH - mouseY), windowW, windowH, recorder, settings);
+        if (hit)
+        {
+            // reset all label font colors to white
+            labelRed->m_fontColor.setBlack();
+            labelGreen->m_fontColor.setBlack();
+            labelBlue->m_fontColor.setBlack();
+            labelOrange->m_fontColor.setBlack();
+            labelGray->m_fontColor.setBlack();
+
+            // check mouse selection
+            if (recorder.m_nearestCollision.m_object == labelRed)
+            {
+                labelRed->m_fontColor.setBlack();
+                if (selectedObject != NULL)
+                    selectedObject->m_material->setRedCrimson();
+            }
+            else if (recorder.m_nearestCollision.m_object == labelGreen)
+            {
+                labelGreen->m_fontColor.setBlack();
+                if (selectedObject != NULL)
+                    selectedObject->m_material->setGreenLightSea();
+            }
+            else if (recorder.m_nearestCollision.m_object == labelBlue)
+            {
+                labelBlue->m_fontColor.setBlack();
+                if (selectedObject != NULL)
+                    selectedObject->m_material->setBlueCornflower();
+            }
+            else if (recorder.m_nearestCollision.m_object == labelOrange)
+            {
+                labelOrange->m_fontColor.setBlack();
+                if (selectedObject != NULL)
+                    selectedObject->m_material->setOrangeRed();
+            }
+            else if (recorder.m_nearestCollision.m_object == labelGray)
+            {
+                labelGray->m_fontColor.setBlack();
+                if (selectedObject != NULL)
+                    selectedObject->m_material->setGrayLight();
+            }
+        }
+        else
+        {
+            // detect for any collision between mouse and world
+            hit = camera->selectWorld(mouseX, (windowH - mouseY), windowW, windowH, recorder, settings);
+            if (hit)
+            {
+                sphereSelect->setShowEnabled(true);
+                normalSelect->setShowEnabled(true);
+                selectedPoint = recorder.m_nearestCollision.m_globalPos;
+                sphereSelect->setLocalPos(selectedPoint);
+                normalSelect->m_pointA.zero();
+                normalSelect->m_pointB = 0.1 * recorder.m_nearestCollision.m_globalNormal;
+                // Select the entire molecule when clicking one of its atoms
+                cGenericObject* clickedObject = recorder.m_nearestCollision.m_object;
+
+                if (clickedObject->getParent() != nullptr &&
+                    clickedObject->getParent()->getParent() == world)
+                {
+                    selectedObject = clickedObject->getParent();
+                }
+                else
+                {
+                    selectedObject = clickedObject;
+                }
+
+                selectedObjectOffset = recorder.m_nearestCollision.m_globalPos - selectedObject->getLocalPos();
+                mouseState = MOUSE_SELECTION;
+            }
+        }
+    }
+    else
+    {
+        mouseState = MOUSE_IDLE;
+    }
+}
+
+//------------------------------------------------------------------------------
+
+void onMouseMotionCallback(GLFWwindow * a_window, double a_posX, double a_posY)
+{
+    
+        // Rotate DNA using R + touchpad or right mouse button
+        bool rotationActive =
+            rotatingDNA ||
+            (glfwGetKey(a_window, GLFW_KEY_R) == GLFW_PRESS);
+
+        if (rotationActive && pdbDNAMolecule != nullptr)
+        {
+            // Record the starting position before rotating
+            if (!rotationStarted)
+            {
+                previousMouseX = a_posX;
+                previousMouseY = a_posY;
+                rotationStarted = true;
+                return;
+            }
+
+            double deltaX = a_posX - previousMouseX;
+            double deltaY = a_posY - previousMouseY;
+
+            previousMouseX = a_posX;
+            previousMouseY = a_posY;
+
+            const double rotationSpeed = 0.3;
+
+            pdbDNAMolecule->rotateAboutLocalAxisDeg(
+                cVector3d(0, 0, 1), deltaX * rotationSpeed);
+
+            pdbDNAMolecule->rotateAboutLocalAxisDeg(
+                cVector3d(1, 0, 0), deltaY * rotationSpeed);
+
+            return;
+        }
+
+        // Reset when rotation stops
+        rotationStarted = false;
+
+        // Existing mouse selection and dragging
+        if ((selectedObject != NULL) && (mouseState == MOUSE_SELECTION))
+        {
+        // get the vector that goes from the camera to the selected point (mouse click)
+        cVector3d vCameraObject = selectedPoint - camera->getLocalPos();
+
+        // get the vector that point in the direction of the camera. ("where the camera is looking at")
+        cVector3d vCameraLookAt = camera->getLookVector();
+
+        // compute the angle between both vectors
+        double angle = cAngle(vCameraObject, vCameraLookAt);
+
+        // compute the distance between the camera and the plane that intersects the object and 
+        // which is parallel to the camera plane
+        double distanceToObjectPlane = vCameraObject.length() * cos(angle);
+
+        // convert the pixel in mouse space into a relative position in the world
+        double factor = (distanceToObjectPlane * tan(0.5 * camera->getFieldViewAngleRad())) / (0.5 * windowH);
+        double posRelX = factor * (a_posX - (0.5 * windowW));
+        double posRelY = factor * ((windowH - a_posY) - (0.5 * windowH));
+
+        // compute the new position in world coordinates
+        cVector3d pos = camera->getLocalPos() +
+            distanceToObjectPlane * camera->getLookVector() +
+            posRelX * camera->getRightVector() +
+            posRelY * camera->getUpVector();
+
+        // compute position of object by taking in account offset
+        cVector3d posObject = pos - selectedObjectOffset;
+
+        // apply new position to object
+        selectedObject->setLocalPos(posObject);
+
+        // place cursor at the position of the mouse click
+        sphereSelect->setLocalPos(pos);
+    }
+}
+
+//------------------------------------------------------------------------------
+
+void close(void)
+{
+    // stop the simulation
+    simulationRunning = false;
+
+    // wait for graphics and haptics loops to terminate
+    while (!simulationFinished) { cSleepMs(100); }
+
+    // close haptic device
+    hapticDevice->close();
+
+    // delete resources
+    delete hapticsThread;
+    delete world;
+    delete handler;
+}
+
+//------------------------------------------------------------------------------
+// --------------------------------------------------
+// MOUSE WHEEL - ZOOM DNA DOUBLE HELIX
+// --------------------------------------------------
+
+void onScrollCallback(GLFWwindow * a_window, double xoffset, double yoffset)
+{
+    if (camera == nullptr)
+    {
+        return;
+    }
+
+    // Current camera position
+    cVector3d cameraPos = camera->getLocalPos();
+
+    // Move the camera forwards or backwards along its viewing direction
+    double zoomStep = 0.08;
+
+    cVector3d newPos =
+        cameraPos + camera->getLookVector() * (yoffset * zoomStep);
+
+    // Prevent the camera from moving too close to the DNA
+    if (newPos.length() > 0.25 && newPos.length() < 5.0)
+    {
+        camera->setLocalPos(newPos);
+    }
+}
+void renderGraphics(void)
+
+{
+    // sanity check
+    if (viewport == nullptr) { return; }
+
+    /////////////////////////////////////////////////////////////////////
+    // UPDATE WIDGETS
+    /////////////////////////////////////////////////////////////////////
+
+    // get width and height of CHAI3D internal rendering buffer
+    int displayW = viewport->getDisplayWidth();
+    int displayH = viewport->getDisplayHeight();
+
+    // update haptic and graphic rate data
+    labelRates->setText(cStr(freqCounterGraphics.getFrequency(), 0) + " Hz / " +
+        cStr(freqCounterHaptics.getFrequency(), 0) + " Hz");
+
+    // update position of label
+    labelRates->setLocalPos((int)(0.5 * (displayW - labelRates->getWidth())), 15);
+
+    // update panel position
+    panel->setLocalPos(10, (displayH - panel->getHeight()) - 10);
+
+    // update position of label
+    labelMessage->setLocalPos((int)(0.5 * (displayW - labelMessage->getWidth())), 40);
+
+
+    /////////////////////////////////////////////////////////////////////
+    // RENDER SCENE
+    /////////////////////////////////////////////////////////////////////
+
+    // update shadow maps (if any)
+    world->updateShadowMaps(false, mirroredDisplay);
+
+    // render world
+    viewport->renderView(framebufferW, framebufferH);
+
+    // wait until all GL commands are completed
+    glFinish();
+
+    // check for any OpenGL errors
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) cout << "Error:  %s\n" << gluErrorString(error);
+
+    // swap buffers
+    glfwSwapBuffers(window);
+
+    // signal frequency counter
+    freqCounterGraphics.signal(1);
+}
+
+//------------------------------------------------------------------------------
+
+void renderHaptics(void)
+{
+    // simulation in now running
+    simulationRunning = true;
+    simulationFinished = false;
+
+    // main haptic simulation loop
+    while (simulationRunning)
+    {
+        /////////////////////////////////////////////////////////////////////////
+        // HAPTIC RENDERING
+        /////////////////////////////////////////////////////////////////////////
+
+        // signal frequency counter
+        freqCounterHaptics.signal(1);
+
+        // compute global reference frames for each object
+        world->computeGlobalPositions(true);
+
+        // update position and orientation of tool
+        tool->updateFromDevice();
+
+        // compute interaction forces
+        tool->computeInteractionForces();
+
+        // send forces to haptic device
+        tool->applyToDevice();
+    }
+
+    // exit haptics thread
+    simulationFinished = true;
+}
+
+//------------------------------------------------------------------------------
